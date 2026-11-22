@@ -1,0 +1,57 @@
+{
+  "game_category": "Grand Theft Auto VI",
+  "max_shorts_per_day": 4,
+  "max_shorts_per_run": 1,
+  "min_hours_between_shorts": 2,
+  "clip_window_hours": 24,
+  "min_twitch_views": 25,
+  "min_seconds": 8,
+  "max_seconds": 59,
+  "release_expiry_hours": 12,
+  "haiku_model": "claude-haiku-5-5",
+  "streamers": [
+    {
+      "twitch": "kreekcraft",
+      "name": "KreekCraft",
+      "youtube_handle": "@KreekCraft",
+      "hashtags": [
+        "#KreekCraft"
+      ],
+      "campaign": "KreekCraft GTA 6 Clipping (ClipLaunch) - clip must show his stream overlay",
+      "call_to_action": "Watch KreekCraft live on Twitch: twitch.tv/kreekcraft",
+      "active": true,
+      "stream_has_own_captions": true
+    },
+    {
+      "twitch": "asianjeff",
+      "name": "AsianJeff",
+      "youtube_handle": "@AsianJeff",
+      "hashtags": [
+        "#AsianJeff"
+      ],
+      "campaign": "AsianJeff Clipping Campaign (Reach)",
+      "call_to_action": "Watch AsianJeff live on Twitch: twitch.tv/asianjeff",
+      "active": true,
+      "stream_has_own_captions": true
+    },
+    {
+      "twitch": "diegoloveless",
+      "name": "DiegoLoveless",
+      "youtube_handle": "@DiegoLoveless",
+      "hashtags": [
+        "#DiegoLoveless"
+      ],
+      "campaign": "DiegoLoveless GTA 6 Twitch streams (ClipLaunch) - needs a clear call to watch his Twitch",
+      "call_to_action": "Watch DiegoLoveless live on Twitch: twitch.tv/diegoloveless",
+      "active": true,
+      "stream_has_own_captions": false
+    }
+  ],
+  "always_hashtags": [
+    "#GTA6",
+    "#GTAVI",
+    "#GTA6Clips",
+    "#Shorts"
+  ],
+  "disclosure": "#ad - paid clipping campaign"
+}
