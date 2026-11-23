@@ -3,9 +3,12 @@
 Each run (GitHub Actions, every 20 min; does nothing when the daily cap / spacing says wait):
   1. Pull the most-viewed English GTA 6 clips on ALL of Twitch from the last 24h (views = the crowd
      already proved it is a hype moment) plus clips of our campaign streamers (they pay, so boosted).
-  2. Haiku judges the best few: 6 frames + timed transcript + loudness peaks -> hype score 1-10.
-     Only min_hype+ is made. Talking, reviews, cutscenes, menus and context-only jokes are rejected.
-  3. Cut to the action window, add hook + captions (+ #ad only for campaign clips), vertical 1080x1920.
+  2. Haiku judges the best few: 10 frames + timed transcript + loudness peaks + the stream's real chat
+     (rate spikes = chat going crazy) -> hype score 1-10. Only min_hype+ is made. Talking, reviews,
+     cutscenes, menus and context-only jokes are rejected. A second strict Haiku pass checks the exact cut
+     a frame per second for nudity (YouTube-friendly channel); any nudity or doubt = blocked.
+  3. Cut to the action window, add hook + captions + scrolling Twitch chat from that moment (cleaned:
+     no swears, slurs, links, emotes) + #ad only for campaign clips, vertical 1080x1920.
   4. Publish as a GitHub Release (mp4 + copy-paste post text) for John's Grok.
 
 Usage:
@@ -103,7 +106,15 @@ def quota_left(state):
 # ---------------------------------------------------------------- find
 TWITCH_GQL = "https://gql.twitch.tv/gql"
 TWITCH_PUBLIC_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # Twitch's own public web client id, not a secret
-CLIP_FIELDS = "slug title viewCount durationSeconds createdAt broadcaster{login displayName} game{name}"
+CLIP_FIELDS = ("slug title viewCount durationSeconds createdAt videoOffsetSeconds video{id} "
+               "broadcaster{login displayName} game{name}")
+# clip titles that name nudity outright are skipped before anything is downloaded
+EXPLICIT_TITLE = re.compile(r"\b(nude|nudes|naked|topless|boobs?|tits?|titties|titty|nipples?|dick|penis|"
+                            r"vagina|pussy|porn|nsfw)\b", re.I)
+CHAT_BLOCK = re.compile(r"(fuck|fck|shit|bitch|cunt|dick|cock|pussy|puss|nigg|nigga|fag|retard|whore|slut|"
+                        r"\bass\b|asshole|porn|tits?\b|boob|titt|nude|naked|rape|kys|kill yourself|"
+                        r"http|www\.|\.com|\.tv|subscribe|follow me|@)", re.I)
+EMOTE_TOKEN = re.compile(r"^[a-z0-9]{2,}[A-Z][A-Za-z0-9]*$")  # channel emotes like ohneFreaky
 
 
 def gql(query):
@@ -177,6 +188,8 @@ def find_candidates(state):
         if (n.get("game") or {}).get("name") != CONFIG["game_category"]:
             continue
         if not login or n["slug"] in used or login in skip or login in blocked:
+            continue
+        if n["slug"] in CONFIG.get("blocked_clips", []) or EXPLICIT_TITLE.search(n.get("title") or ""):
             continue
         if not (CONFIG["min_seconds"] <= (n.get("durationSeconds") or 0) <= 61):
             continue
@@ -277,6 +290,70 @@ def grab_frames(src, workdir, duration, count=6):
     return frames
 
 
+def fetch_chat(clip, duration):
+    """Real Twitch chat from the stream's VOD during the clip: [(sec_into_clip, name, color, text)].
+    Empty when the VOD is gone / sub-only."""
+    vid = (clip.get("video") or {}).get("id")
+    base = clip.get("videoOffsetSeconds")
+    if not vid or base is None:
+        return []
+    raw, seen, off = [], set(), int(base)
+    for _ in range(40):
+        q = ('query{ video(id:"%s"){ comments(contentOffsetSeconds:%d){ edges{ node{ id contentOffsetSeconds '
+             'commenter{displayName} message{userColor fragments{text}} } } } } }' % (vid, off))
+        edges = (((gql(q).get("video") or {}).get("comments") or {}).get("edges")) or []
+        top = off
+        for e in edges:
+            nd = e["node"]
+            top = max(top, nd["contentOffsetSeconds"])
+            if nd["id"] in seen:
+                continue
+            seen.add(nd["id"])
+            raw.append(nd)
+        if not edges or top >= base + duration + 3:
+            break
+        off = top + 1 if top > off else off + 3
+    by_sec = {}
+    for nd in raw:
+        by_sec.setdefault(nd["contentOffsetSeconds"], []).append(nd)
+    out = []
+    for sec, nodes in by_sec.items():  # offsets are whole seconds: spread each second's messages across it
+        for k, nd in enumerate(nodes):
+            t = sec - base + k / len(nodes)
+            if not (0 <= t <= duration + 3):
+                continue
+            text = "".join(f.get("text") or "" for f in (nd.get("message") or {}).get("fragments") or [])
+            out.append((round(t, 2), (nd.get("commenter") or {}).get("displayName") or "viewer",
+                        (nd.get("message") or {}).get("userColor") or "", text))
+    out.sort()
+    return out
+
+
+def clean_chat(msgs):
+    """YouTube-friendly chat: no swears/slurs/links/self-promo, emotes and emoji stripped, short lines."""
+    keep = []
+    for t, name, color, text in msgs:
+        if CHAT_BLOCK.search(text) or CHAT_BLOCK.search(name) or text.lstrip().startswith("!"):
+            continue
+        words = [w for w in text.split() if not EMOTE_TOKEN.match(w)]
+        text = re.sub(r"[^\x20-\x7E]", "", " ".join(words)).strip()
+        text = re.sub(r"(.)\1{6,}", lambda m: m.group(1) * 6, text)  # LOOOOOOOOOOL -> LOOOOOOL
+        if len(text) < 1 or len(text) > 40 or not re.search(r"[A-Za-z0-9]", text):
+            continue
+        name = re.sub(r"[^\x20-\x7E]", "", name)[:16] or "viewer"
+        keep.append((t, name, color, text))
+    return keep
+
+
+def chat_rate(msgs, duration):
+    """Messages per second across the clip (raw chat, before cleaning) - a spike = chat going crazy."""
+    counts = [0] * (int(duration) + 1)
+    for t, *_ in msgs:
+        if 0 <= t <= duration:
+            counts[min(int(t), len(counts) - 1)] += 1
+    return counts
+
+
 def timed_transcript(words):
     lines, cur, t0 = [], [], None
     for a, _, w in words:
@@ -301,21 +378,31 @@ SCHEMA = {
                                             "menu_or_loading", "needs_context", "unsafe", "other"]},
         "reason": {"type": "string"},
         "burned_captions": {"type": "boolean"},
+        "chat_on_screen": {"type": "boolean"},
         "start": {"type": "number"},
         "end": {"type": "number"},
         "title": {"type": "string"},
         "hook": {"type": "string"},
         "summary": {"type": "string"},
     },
-    "required": ["hype", "kind", "reason", "burned_captions", "start", "end", "title", "hook", "summary"],
+    "required": ["hype", "kind", "reason", "burned_captions", "chat_on_screen", "start", "end", "title", "hook", "summary"],
     "additionalProperties": False,
 }
 
 
-def judge_and_write(cand, duration, words, peaks, frames):
+def judge_and_write(cand, duration, words, peaks, frames, chat_raw=(), chat_clean=()):
     """One Haiku call: how exciting is it (hype 1-10), where is the action, and the post text."""
     import anthropic
     clip, name = cand["clip"], cand["streamer"]["name"]
+    if chat_raw:
+        rate = chat_rate(chat_raw, duration)
+        sample = "; ".join(f"[{t:.0f}s] {txt}" for t, _, _, txt in list(chat_clean)[::max(1, len(chat_clean) // 40)][:40])
+        chat_info = (f"Live chat messages per second during the clip (second 0 first): {rate}\n"
+                     f"Sample of chat messages: {sample or '(none)'}\n"
+                     f"A chat explosion (rate spike, LOL/WTF/W spam) right after something happens is a strong sign "
+                     f"of a hype moment.")
+    else:
+        chat_info = "Live chat: not available for this clip."
     prompt = f"""You pick clips for a YouTube Shorts channel of the most exciting, funny, crazy GTA 6 streamer moments.
 Viewers scroll fast: a Short only works if something visibly happens and the payoff lands within seconds.
 
@@ -324,6 +411,7 @@ Viewer's clip title (best clue to the moment): {clip.get('title', '')!r}
 Loudest moments (second, dB above the clip's normal level; yelling, crashes, explosions): {peaks}
 Timed transcript (machine-made, mishears words):
 {timed_transcript(words) or '(no speech)'}
+{chat_info}
 The images are frames at these seconds: {[t for t, _ in frames]}.
 
 Score "hype" 1-10 honestly and strictly. 8-10 = big crash, chaos, epic fail, scare, wild stunt, glitch, or a
@@ -331,16 +419,18 @@ huge funny reaction to something visible on screen; a stranger with no context w
 5-7 = mildly amusing. 1-4 = nothing much happens. Use the kinds talking / review_opinion / cutscene /
 menu_or_loading / needs_context (score at most 4) when the clip is the streamer chatting, giving opinions or
 ratings, watching a story cutscene, sitting in menus, or a joke that needs stream context.
-Sexual humor, flirting, suggestive dancing, strip-club chaos and "gyatt" reactions are fine; that is part of
-GTA and gets views, so score them like anything else on how funny/crazy the reaction is. Use "unsafe"
-(score 1) ONLY when bare nipples or genitals are clearly and plainly visible in a frame, or for slurs or
-real-world tragedy. Dark club scenes, underwear, bikinis, twerking and implied scenes are NOT unsafe. If you
-are unsure, it is not unsafe.
+The channel must stay YouTube-friendly. Sexual humor, flirting, "gyatt" reactions and clothed suggestive
+dancing are fine and get views; score them on how funny/crazy the reaction is. But use "unsafe" (score 1)
+whenever ANY frame shows nudity, even in-game, partial, dark or brief: bare breasts or nipples, a topless or
+nude character, bare buttocks with only a thong/nothing, genitals, or sex acts. Also "unsafe" for slurs or
+real-world tragedy. If a frame might show nudity and you cannot tell, call it unsafe.
 
 Also return:
 - burned_captions: true if the frames already show the streamer's own subtitle text on screen.
+- chat_on_screen: true if the frames already show the stream's Twitch chat (a list of username: message lines).
 - start / end (seconds): the tightest window that keeps the setup and the payoff. Cut dead air and slow
-  build-up before the action; keep 1-2 seconds after the payoff. At least 8 seconds. Use 0 and {duration:.0f}
+  build-up before the action; keep 2-3 seconds after the payoff so the streamer's and chat's reaction
+  shows. At least 8 seconds. Use 0 and {duration:.0f}
   if the whole clip is needed.
 - title: max 60 characters. Start with "{name}", end with " | GTA 6" ("GTA 6" written only once). Say what
   happens, specific and curiosity-driven, e.g. "KreekCraft Tries Insurance Fraud | GTA 6". No emojis, no
@@ -375,6 +465,58 @@ Also return:
     return data
 
 
+NUDITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "nudity": {"type": "boolean"},
+        "unsure": {"type": "boolean"},
+        "seconds": {"type": "array", "items": {"type": "number"}},
+        "note": {"type": "string"},
+    },
+    "required": ["nudity", "unsure", "seconds", "note"],
+    "additionalProperties": False,
+}
+
+
+def nudity_check(src, workdir, start, end):
+    """Second, strict pass over the exact cut: a frame every second. Returns (ok, note)."""
+    import anthropic
+    span = max(end - start, 1.0)
+    step = max(1.0, span / 20)  # at most ~20 frames
+    frames, t, k = [], start + 0.3, 0
+    while t < end and k < 22:
+        f = workdir / f"n{k}.jpg"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1",
+                        "-vf", "scale=-2:720", "-q:v", "4", str(f)], check=False)
+        if f.exists():
+            frames.append((round(t, 1), f))
+        t += step
+        k += 1
+    content = []
+    for sec, f in frames:
+        content.append({"type": "text", "text": f"Frame at {sec}s:"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                    "data": base64.b64encode(f.read_bytes()).decode()}})
+    content.append({"type": "text", "text": (
+        "These are frames from a GTA 6 video game stream clip that will be posted as a YouTube Short. "
+        "YouTube age-restricts or removes nudity even when it is a video game character. Look at every frame "
+        "carefully, including dark, small, background and partly covered areas. "
+        "nudity = true if any frame shows bare female breasts or nipples (including topless dancers or pasties), "
+        "fully bare buttocks, genitals, or a sex act, on any in-game character. Clothed, bikini, lingerie with "
+        "covered nipples, and suggestive dancing while covered are NOT nudity. "
+        "unsure = true if something looks like it could be nudity but you cannot tell. "
+        "seconds = the frame times that show it. note = one short sentence.")})
+    resp = anthropic.Anthropic().messages.create(
+        model=CONFIG["haiku_model"], max_tokens=600,
+        output_config={"effort": "medium", "format": {"type": "json_schema", "schema": NUDITY_SCHEMA}},
+        messages=[{"role": "user", "content": content}],
+    )
+    if resp.stop_reason == "refusal":
+        return False, "safety check refused"
+    d = json.loads(next(b.text for b in resp.content if b.type == "text"))
+    return not (d["nudity"] or d["unsure"]), f"nudity={d['nudity']} unsure={d['unsure']} {d['seconds']} {d['note']}"
+
+
 # ---------------------------------------------------------------- render
 def ass_time(t):
     h, rem = divmod(max(t, 0), 3600)
@@ -386,7 +528,47 @@ def ass_escape(t):
     return t.replace("\\", "").replace("{", "(").replace("}", ")")
 
 
-def build_ass(words, hook, disclosure, duration, path, font, offset=0.0):
+CHAT_COLORS = ["FF4500", "1E90FF", "00FF7F", "FFD700", "FF69B4", "9ACD32", "00CED1", "FF7F50", "DA70D6"]
+
+
+def ass_color(hex_rgb, name):
+    h = (hex_rgb or "").lstrip("#")
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", h):
+        h = CHAT_COLORS[sum(map(ord, name)) % len(CHAT_COLORS)]
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    if lum < 150:  # dark names vanish on the black box: blend toward white
+        k = (150 - lum) / (255 - lum)
+        r, g, b = (int(c + (255 - c) * k) for c in (r, g, b))
+    return f"&H{b:02X}{g:02X}{r:02X}&"
+
+
+def chat_events(chat, duration, offset):
+    """Twitch-style live chat: newest line at the bottom, older lines push up, max 6 on screen,
+    at most ~3 new lines a second so it stays readable."""
+    lines = []
+    pre = [m for m in chat if offset - 4 <= m[0] < offset][-3:]  # chat already on screen when the Short starts
+    shown, last = [(0.0,) + m[1:] for m in pre], -1.0
+    for t, name, color, text in chat:
+        t -= offset
+        if 0 <= t < duration - 0.3 and t - last >= 0.33:
+            shown.append((t, name, color, text))
+            last = t
+    bottom, gap, keep = 1300, 60, 6
+    for i, (t, *_rest) in enumerate(shown):
+        t_end = shown[i + 1][0] if i + 1 < len(shown) else duration
+        if t_end <= t:
+            continue
+        visible = shown[max(0, i - keep + 1): i + 1]
+        for row, (_, name, color, text) in enumerate(reversed(visible)):
+            fade = "\\fad(120,0)" if row == 0 and t > 0 else ""
+            lines.append(f"Dialogue: 3,{ass_time(t)},{ass_time(t_end)},Chat,,0,0,0,,"
+                         f"{{\\an1\\pos(36,{bottom - row * gap}){fade}\\c{ass_color(color, name)}}}{ass_escape(name)}"
+                         f"{{\\c&HFFFFFF&}}: {ass_escape(text)}\n")
+    return lines
+
+
+def build_ass(words, hook, disclosure, duration, path, font, offset=0.0, chat=()):
     words = [(a - offset, b - offset, t) for a, b, t in words if a >= offset and a - offset < duration]
     head = f"""[Script Info]
 ScriptType: v4.00+
@@ -399,6 +581,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Cap,{font},92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,7,2,2,60,60,470,1
 Style: Hook,{font},84,&H0000F0FF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,8,3,8,60,60,120,1
 Style: Ad,Arial,34,&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,0,0,3,2,0,7,30,30,30,1
+Style: Chat,Arial,38,&H00FFFFFF,&H00FFFFFF,&H60000000,&H60000000,1,0,0,0,100,100,0,0,3,7,0,1,36,36,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -419,6 +602,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         text = ass_escape(" ".join(t for t in clean if t).upper())
         if text:
             lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Cap,,0,0,0,,{text}\n")
+    if chat:
+        lines += chat_events(list(chat), duration, offset)
     path.write_text("".join(lines), encoding="utf-8")
 
 
@@ -494,13 +679,21 @@ def evaluate(cand, workdir):
     duration = float(info.get("duration") or cand["clip"].get("durationSeconds") or 30)
     src, is_portrait = download(info, workdir)
     words, peaks = transcribe(src, workdir)
-    frames = grab_frames(src, workdir, duration)
-    j = judge_and_write(cand, duration, words, peaks, frames)
+    frames = grab_frames(src, workdir, duration, count=10)
+    chat_raw = fetch_chat(cand["clip"], duration)
+    chat = clean_chat(chat_raw)
+    log(f"    chat: {len(chat_raw)} messages ({len(chat)} kept after the clean filter)")
+    j = judge_and_write(cand, duration, words, peaks, frames, chat_raw, chat)
     if not j:
         log("    judge returned nothing (refused)")
         return None
     log(f"    hype {j['hype']}/10 {j['kind']}  cut {j['start']}-{j['end']}s: {j['reason'][:140]}")
-    cand.update(judge=j, src=src, is_portrait=is_portrait, words=words, duration=duration)
+    if j["hype"] >= CONFIG["min_hype"] and j["kind"] not in BAD_KINDS:
+        ok, note = nudity_check(src, workdir, j["start"], j["end"])
+        log(f"    nudity check: {'PASS' if ok else 'BLOCKED'} - {note[:160]}")
+        if not ok:
+            j["kind"], j["hype"], j["reason"] = "unsafe", 1, f"nudity check: {note}"
+    cand.update(judge=j, src=src, is_portrait=is_portrait, words=words, duration=duration, chat=chat)
     return cand
 
 
@@ -515,7 +708,8 @@ def make_short(cand, workdir, number):
         own_caps = j["burned_captions"]
     ass = workdir / "caps.ass"
     build_ass([] if own_caps else cand["words"], j["hook"], CONFIG["disclosure"] if cand["campaign"] else "",
-              j["end"] - j["start"], ass, font_name, offset=j["start"])
+              j["end"] - j["start"], ass, font_name, offset=j["start"],
+              chat=cand.get("chat") if CONFIG.get("show_chat", True) and not j.get("chat_on_screen") else ())
     safe = re.sub(r"[^A-Za-z0-9]+", "-", j["title"]).strip("-")[:50]
     out = workdir / f"GTA6-{number:04d}-{safe}.mp4"
     render(cand["src"], cand["is_portrait"], ass, out, workdir, j["start"], j["end"])
