@@ -4,13 +4,20 @@ Everything for the GTA 6 clip channel lives in this folder. This repo is only fo
 not connected to any other project.
 
 ## What it does (no PC needed)
-Every hour, GitHub's cloud runs `gta6_clipper.py`:
-1. Checks the Twitch clips of the campaign streamers in `config.json` (AsianJeff, KreekCraft, DiegoLoveless).
-2. Keeps only Grand Theft Auto VI clips from the last 24 hours and picks the one gaining views fastest.
-3. Makes a vertical 1080x1920 Short with a hook line, captions where needed and the #ad disclosure.
+Every 20 minutes, GitHub's cloud checks whether a Short is due. When one is, it runs `gta6_clipper.py`:
+1. Pulls the most-viewed English GTA 6 clips on all of Twitch: the hottest from the last 24 hours, plus big
+   launch-week moments with 15K+ views. Clips from our campaign streamers (`config.json`) get a boost
+   because they pay.
+2. Claude Haiku judges the top 5. It looks at frames, the transcript and the loudness peaks, and scores
+   each one 1-10 for how crazy or funny it is.
+   - It rejects talking, reviews, cutscenes, menus, jokes that need context, and visible nudity.
+   - It keeps sexual humor.
+3. Cuts the best one (6+) to the action. Adds a hook line, captions where needed, and an #ad label only
+   for campaign clips.
 4. Publishes it as a **Release** named `GTA6 #N - <title>` with the MP4 attached.
 
-There are at most 4 a day, at least 2 hours apart.
+There are at most 4 a day, 2 hours apart, and at most 2 per streamer per day. If nothing scores high
+enough, nothing is posted that run.
 
 ## Where the Shorts are
 **https://github.com/CalFriendly/gta6-shorts/releases**
@@ -29,8 +36,8 @@ Every 2 hours:
    - **Description**: paste exactly the text in the "YouTube description" box
    - **Tags**: paste the "Tags" box into YouTube's Tags field
    - **Audience**: Not made for kids. Visibility: Public.
-5. Within 30 minutes of it going live, submit the Short's link on Content Rewards to the campaign named
-   under "Campaign" in the release.
+5. If the release's "Campaign" section names a campaign, submit the Short's link to it on Content Rewards
+   within 30 minutes of it going live. If it says "None", there is nothing to submit.
 6. Post them oldest first. Leave at least 1 hour between uploads.
 
 ## Changing things
