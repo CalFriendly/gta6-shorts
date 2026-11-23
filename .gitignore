@@ -3,3 +3,4 @@ GTA6/out/
 GTA6/state/
 *.mp4
 .env
+tools/*.log
